@@ -1,0 +1,68 @@
+[project]
+name = "flygym"
+version = "2.0.0-rc.0"
+description = "NeuroMechFly, a framework for simulating embodied sensorimotor control in adult Drosophila."
+requires-python = ">=3.12,<3.13"
+authors = [
+    { name = "Sibo Wang-Chen", email = "sibo.wang@epfl.ch" },
+    { name = "Victor Alfred Stimpfling", email = "victor.stimpfling@epfl.ch" },
+    { name = "Thomas Ka Chung Lam", email = "thomas.lam@epfl.ch" },
+    { name = "Pembe Gizem Özdil", email = "pembe.ozdil@epfl.ch" },
+    { name = "Louise Genoud", email = "louise.genoud@epfl.ch" },
+    { name = "Femke Hurtak", email = "femke.hurtak@epfl.ch" },
+    { name = "Pavan Ramdya", email = "pavan.ramdya@epfl.ch" },
+]
+maintainers = [
+    { name = "Sibo Wang-Chen", email = "sibo.wang@epfl.ch" },
+    { name = "Victor Alfred Stimpfling", email = "victor.stimpfling@epfl.ch" },
+    { name = "Dominic Dall'Osto", email = "dominic.dallosto@epfl.ch" },
+    { name = "Thomas Ka Chung Lam", email = "thomas.lam@epfl.ch" },
+]
+readme = "README.md"
+license = "Apache-2.0"
+dependencies = [
+    "mujoco>=3.5,<3.6",
+    "numpy>=2.0,<3.0",
+    "dm_control @ git+https://github.com/google-deepmind/dm_control.git@80ac24d84e7aa5bfd264948416765cb79f2c6f58",
+    "pyyaml>=6.0,<7.0",
+    "mediapy>=1.2,<3.0",
+    "imageio>=2.37,<3.0",
+    "imageio-ffmpeg==0.6.0",
+    "jaxtyping==0.3.7",
+    "tabulate==0.9.0",
+    "black>=26.1,<27.0",
+    "ipykernel>=7.1.0",
+    "ipython>=9.10,<10.0",
+    "pandas>=3.0,<4.0",
+    "matplotlib>=3.10,<4.0",
+]
+
+[project.optional-dependencies]
+warp = [
+    "warp-lang>=1.11,<1.12",
+    "mujoco_warp>=3.5,<3.6",
+]
+dev = [
+    "pytest>=9.0,<10.0",
+    "nbstripout==0.9.0",  # git pre-commit filter: strips output from ipynb notebooks
+]
+
+[project.urls]
+homepage = "https://neuromechfly.org/"
+repository = "https://github.com/NeLy-EPFL/cobar-2026"
+documentation = "https://neuromechfly.org/"
+"Bug Tracker" = "https://github.com/NeLy-EPFL/cobar-2026/issues"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+flygym = ["assets/**"]
