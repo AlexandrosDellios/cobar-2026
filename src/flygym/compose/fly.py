@@ -1,3 +1,4 @@
+from functools import cached_property
 from pathlib import Path
 from os import PathLike
 from enum import Enum
@@ -75,6 +76,8 @@ class Fly(BaseCompositionElement):
             actuator elements (only if the actuator exists).
         sensorname_to_mjcfsensor:
             Maps sensor names to MJCF sensor elements.
+        odorsensorname_to_mjcfsensor:
+            Maps odor sensor names to MJCF sensor elements.
         cameraname_to_mjcfcamera:
             Maps camera names to MJCF camera elements.
         jointdof_to_neutralangle:
@@ -108,7 +111,10 @@ class Fly(BaseCompositionElement):
         self.jointdof_to_mjcfjoint = {}
         self.jointdof_to_mjcfactuator_by_type = {ty: {} for ty in ActuatorType}
         self.sensorname_to_mjcfsensor = {}
+        self.odorsensorname_to_mjcfsensor = {}
         self.cameraname_to_mjcfcamera = {}
+        self.eyecameraname_to_mjcfcamera = {}
+        self.hiddenbodyseg_to_mjcfgeom = {}
 
         self.jointdof_to_neutralangle = {}
         self.jointdof_to_neutralaction_by_type = {ty: {} for ty in ActuatorType}
@@ -133,6 +139,12 @@ class Fly(BaseCompositionElement):
     def name(self) -> str:
         return self._name
 
+    @cached_property
+    def retina(self):
+        from flygym.vision.retina import Retina
+
+        return Retina()
+
     def get_bodysegs_order(self) -> Iterable[BodySegment]:
         """Get the canonical order of body segments. The exact order is not important,
         but it should be respected consistently throughout. For example, during
@@ -152,6 +164,84 @@ class Fly(BaseCompositionElement):
         provide control input in this order."""
         actuator_type = ActuatorType(actuator_type)
         return list(self.jointdof_to_mjcfactuator_by_type[actuator_type].keys())
+
+    def add_odor_sensors(self, draw_markers: bool = False):
+        """Add olfactory sensors to the fly. The sensors are defined in olfaction.yaml
+        in the assets directory.
+
+        Args:
+            draw_markers:
+                If True, add visible markers to indicate sensor locations.
+
+        Returns:
+            Dictionary mapping sensor names to MJCF sensor elements.
+        """
+        with open(assets_dir / "model/olfaction.yaml") as f:
+            sensor_infos = yaml.safe_load(f)["sensors"]
+
+        return_dict = {}
+
+        for sensor_name, sensor_info in sensor_infos.items():
+            parent_body = self.mjcf_root.find("body", sensor_info["parent"])
+            sensor_body = parent_body.add(
+                "body", name=f"{sensor_name}_body", pos=sensor_info["rel_pos"]
+            )
+            sensor = self.mjcf_root.sensor.add(
+                "framepos",
+                name=f"{sensor_name}_pos_sensor",
+                objtype="body",
+                objname=f"{sensor_name}_body",
+            )
+            if draw_markers:
+                sensor_body.add(
+                    "geom",
+                    name=f"{sensor_name}_marker",
+                    type="sphere",
+                    size=[0.06],
+                    rgba=sensor_info["marker_rgba"],
+                )
+            return_dict[sensor.name] = sensor
+
+        self.odorsensorname_to_mjcfsensor.update(return_dict)
+        return return_dict
+
+    def add_vision(self, draw_sensor_markers: bool = False):
+        with open(assets_dir / "model/vision.yaml") as f:
+            info = yaml.safe_load(f)
+
+        return_dict = {}
+
+        for sensor_name, sensor_info in info["sensors"].items():
+            parent_body = self.mjcf_root.find("body", sensor_info["parent"])
+            sensor_body = parent_body.add(
+                "body",
+                name=f"{sensor_name}_body",
+                pos=sensor_info["rel_pos"],
+            )
+            cam = sensor_body.add(
+                "camera",
+                name=f"{sensor_name}_camera",
+                # dclass="nmf",
+                mode="fixed",
+                euler=sensor_info["orientation"],
+                fovy=info["fovy_per_eye"],
+            )
+            if draw_sensor_markers:
+                sensor_body.add(
+                    "geom",
+                    name=f"{sensor_name}_marker",
+                    type="sphere",
+                    size=[0.06],
+                    rgba=sensor_info["marker_rgba"],
+                )
+            return_dict[sensor_name] = cam
+
+        self.eyecameraname_to_mjcfcamera.update(return_dict)
+
+        for segment_name in info["hidden_segments"]:
+            self.hiddenbodyseg_to_mjcfgeom[segment_name] = self.mjcf_root.find(
+                "geom", segment_name
+            )
 
     def add_joints(
         self,
