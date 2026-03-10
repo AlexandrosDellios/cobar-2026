@@ -1,3 +1,5 @@
+from operator import call
+from functools import cached_property, cache
 from collections import defaultdict
 from typing import Any
 
@@ -27,12 +29,16 @@ class Simulation:
         self._map_internal_bodyids()
         self._map_internal_qposqveladrs()
         self._map_internal_actuator_ids()
+        self._map_internal_odor_sensor_ids()
+        self._map_internal_eye_camera_ids()
+        self._map_internal_hidden_segment_ids()
 
         # For performance profiling
         self._curr_step = 0
         self._frames_rendered = 0
         self._total_physics_time_ns = 0
         self._total_render_time_ns = 0
+        self._last_vision_render_time = None
 
         # Reset everything (physics, renderers, and profiling stats)
         self.reset()
@@ -53,6 +59,7 @@ class Simulation:
         self._frames_rendered = 0
         self._total_physics_time_ns = 0
         self._total_render_time_ns = 0
+        self._last_vision_render_time = None
 
     def step(self) -> None:
         physics_start_ns = perf_counter_ns()
@@ -60,6 +67,11 @@ class Simulation:
         physics_finish_ns = perf_counter_ns()
         self._total_physics_time_ns += physics_finish_ns - physics_start_ns
         self._curr_step += 1
+
+        if self._last_vision_render_time is not None:
+            if self.time - self._last_vision_render_time >= 1 / 500:
+                self.get_raw_vision.cache_clear()
+                self.get_ommatidia_readouts.cache_clear()
 
     def set_renderer(
         self,
@@ -104,6 +116,67 @@ class Simulation:
     def get_body_rotations(self, fly_name: str) -> Float[np.ndarray, "n_bodies 4"]:
         internal_ids = self._internal_bodyids_by_fly[fly_name]
         return self.mj_data.xquat[internal_ids, :]
+
+    def get_olfaction(
+        self, fly_name: str
+    ) -> Float[np.ndarray, "n_sensors n_odor_dimensions"]:
+        if callable(getattr(self.world, "get_olfaction", None)):
+            internal_ids = self._intern_odor_sensorids_by_fly[fly_name]
+            indices = self.mj_model.sensor_adr[internal_ids][:, None] + np.arange(3)
+            sensor_positions = self.mj_data.sensordata[indices]
+            return getattr(self.world, "get_olfaction")(sensor_positions)
+        else:
+            raise NotImplementedError("The current world does not support olfaction.")
+
+    @cached_property
+    def eye_renderer(self):
+        from flygym import assets_dir
+        import yaml
+
+        with open(assets_dir / "model/vision.yaml", "r") as f:
+            vision_config = yaml.safe_load(f)
+
+        renderer = mujoco.Renderer(
+            self.mj_model,
+            height=vision_config["raw_img_height_px"],
+            width=vision_config["raw_img_width_px"],
+        )
+        return renderer
+
+    @cache
+    def get_raw_vision(
+        self, fly_name: str
+    ) -> list[Float[np.ndarray, "height width 3"]]:
+        self._last_vision_render_time = self.time
+        internal_hidden_segment_ids = self._intern_hidden_segment_ids_by_fly[fly_name]
+        alpha = self.mj_model.geom_rgba[internal_hidden_segment_ids, 3].copy()
+        # Hide hidden segments by setting alpha to 0
+        self.mj_model.geom_rgba[internal_hidden_segment_ids, 3] = 0
+        internal_eye_camera_ids = self._intern_eye_camera_ids_by_fly[fly_name]
+        frames = []
+        retina = self.world.fly_lookup[fly_name].retina
+
+        for cam_id in internal_eye_camera_ids:
+            self.eye_renderer.update_scene(self.mj_data, cam_id)
+            raw_frame = self.eye_renderer.render()
+            fish_img = retina.correct_fisheye(raw_frame)
+            frames.append(fish_img)
+
+        # Restore original alpha values
+        self.mj_model.geom_rgba[internal_hidden_segment_ids, 3] = alpha
+        return frames
+
+    @cache
+    def get_ommatidia_readouts(
+        self, fly_name: str
+    ) -> Float[np.ndarray, "n_cameras n_ommatidia 2"]:
+        raw_vision = self.get_raw_vision(fly_name)
+        retina = self.world.fly_lookup[fly_name].retina
+        ommatidia_readouts = np.array(
+            [retina.raw_image_to_hex_pxls(image) for image in raw_vision],
+            dtype=np.float32,
+        )
+        return ommatidia_readouts
 
     def set_actuator_inputs(
         self,
@@ -191,9 +264,66 @@ class Simulation:
             for actuator_ty, ids_by_fly in internal_actuatorids_by_fly_by_type.items()
         }
 
+    def _map_internal_odor_sensor_ids(self) -> None:
+        internal_odor_sensorids_by_fly = defaultdict(list)
+
+        for fly_name, fly in self.world.fly_lookup.items():
+            for odor_sensor_element in fly.odorsensorname_to_mjcfsensor.values():
+                internal_odor_sensor_id = mujoco.mj_name2id(
+                    self.mj_model,
+                    mujoco.mjtObj.mjOBJ_SENSOR,
+                    odor_sensor_element.full_identifier,
+                )
+                internal_odor_sensorids_by_fly[fly_name].append(internal_odor_sensor_id)
+
+        self._intern_odor_sensorids_by_fly = {
+            k: np.array(v, dtype=np.int32)
+            for k, v in internal_odor_sensorids_by_fly.items()
+        }
+
+    def _map_internal_eye_camera_ids(self):
+        internal_eye_camera_ids_by_fly = defaultdict(list)
+
+        for fly_name, fly in self.world.fly_lookup.items():
+            for eye_camera_element in fly.eyecameraname_to_mjcfcamera.values():
+                internal_eye_camera_id = mujoco.mj_name2id(
+                    self.mj_model,
+                    mujoco.mjtObj.mjOBJ_CAMERA,
+                    eye_camera_element.full_identifier,
+                )
+                internal_eye_camera_ids_by_fly[fly_name].append(internal_eye_camera_id)
+
+        self._intern_eye_camera_ids_by_fly = {
+            k: np.array(v, dtype=np.int32)
+            for k, v in internal_eye_camera_ids_by_fly.items()
+        }
+
+    def _map_internal_hidden_segment_ids(self):
+        internal_hidden_segment_ids_by_fly = defaultdict(list)
+
+        for fly_name, fly in self.world.fly_lookup.items():
+            for hidden_segment_element in fly.hiddenbodyseg_to_mjcfgeom.values():
+                internal_hidden_segment_id = mujoco.mj_name2id(
+                    self.mj_model,
+                    mujoco.mjtObj.mjOBJ_GEOM,
+                    hidden_segment_element.full_identifier,
+                )
+                internal_hidden_segment_ids_by_fly[fly_name].append(
+                    internal_hidden_segment_id
+                )
+
+        self._intern_hidden_segment_ids_by_fly = {
+            k: np.array(v, dtype=np.int32)
+            for k, v in internal_hidden_segment_ids_by_fly.items()
+        }
+
     @property
     def time(self) -> float:
         return self.mj_data.time
+
+    @property
+    def timestep(self) -> float:
+        return self.mj_model.opt.timestep
 
     def print_performance_report(self) -> None:
         print_perf_report(

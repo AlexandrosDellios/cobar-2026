@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Collection
-from typing import override
+from typing import override, Callable
 
 import mujoco
 import dm_control.mjcf as mjcf
@@ -56,6 +56,7 @@ class BaseWorld(BaseCompositionElement, ABC):
         self._neutral_keyframe = self.mjcf_root.keyframe.add(
             "key", name="neutral", time=0
         )
+        self._add_skybox()
 
     @override
     @property
@@ -91,6 +92,37 @@ class BaseWorld(BaseCompositionElement, ABC):
             The free joint element created by the attachment.
         """
         pass
+
+    def _add_skybox(self):
+        self.mjcf_root.asset.add(
+            "texture",
+            name="skybox",
+            type="skybox",
+            builtin="gradient",
+            rgb1=(1, 1, 1),
+            rgb2=(1, 1, 1),
+            width=10,
+            height=10,
+        )
+
+    def add_light(
+        self,
+        name="light_top",
+        type="directional",
+        castshadow=False,
+        pos=(0, 0, 80),
+        dir=(0, 0, -1),
+        **kwargs,
+    ):
+        self.mjcf_root.worldbody.add(
+            "light",
+            name=name,
+            type=type,
+            castshadow=castshadow,
+            pos=pos,
+            dir=dir,
+            **kwargs,
+        )
 
     def add_fly(
         self,
@@ -130,6 +162,24 @@ class BaseWorld(BaseCompositionElement, ABC):
         self.world_dof_neutral_states[freejoint.full_identifier] = neutral_state
 
         self._rebuild_neutral_keyframe()
+
+    def add_camera(
+        self,
+        name: str = "birdeyecam",
+        mode: str = "fixed",
+        pos: Vec3 = (0, 0, 35),
+        rotation: Rotation3D = Rotation3D("euler", (0, 0, 0)),
+        fovy: float = 45,
+    ):
+        camera = self.mjcf_root.worldbody.add(
+            "camera",
+            name=name,
+            mode=mode,
+            pos=pos,
+            fovy=fovy,
+            **rotation.as_kwargs(),
+        )
+        return camera
 
     def _rebuild_neutral_keyframe(self):
         mj_model, _ = self.compile()
@@ -188,6 +238,127 @@ class BaseWorld(BaseCompositionElement, ABC):
 
         self._neutral_keyframe.qpos = neutral_qpos
         self._neutral_keyframe.ctrl = neutral_ctrl
+
+
+class OdorMixin:
+    mjcf_root: mjcf.RootElement
+    odor_positions: np.ndarray
+    peak_intensities: np.ndarray
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.odor_positions = np.empty((0, 3))
+        self.peak_intensities = np.empty((0, 0))
+
+    def add_odor_source(
+        self,
+        pos: Vec3,
+        peak_intensity=np.array([1.0]),
+        name=None,
+        marker_type: str = "capsule",
+        marker_size: float = (0.25, 0.25),
+        marker_rgba: tuple[float, float, float, float] = (1, 0, 0, 1),
+    ) -> None:
+        """
+        Add an odor source to the world.
+
+        Args:
+            pos:
+                The position of the odor source.
+            peak_intensity:
+                The peak intensity of the odor source.
+            name:
+                The name of the odor source.
+            marker_type:
+                The type of marker to use for the odor source.
+            marker_size:
+                The size of the marker.
+            marker_rgba:
+                The color of the marker.
+        """
+        if name is None:
+            name = f"odor_source_{len(self.odor_positions)}"
+
+        if self.peak_intensities.shape[0] == 0:
+            self.peak_intensities = np.array([peak_intensity])
+        else:
+            self.peak_intensities = np.vstack([self.peak_intensities, peak_intensity])
+
+        self.odor_positions = np.vstack([self.odor_positions, pos])
+
+        marker_body = self.mjcf_root.worldbody.add(
+            "body", name=name, pos=pos, mocap=True
+        )
+        marker_body.add(
+            "geom",
+            type=marker_type,
+            size=marker_size,
+            rgba=marker_rgba,
+        )
+
+    def get_olfaction(self, sensor_positions: np.ndarray):
+        """
+        Get the olfactory sensor readings based on the current positions of the odor sources
+        and the sensor positions.
+
+        Args:
+            sensor_positions:
+                An array of shape (n_sensors, 3) containing the positions of the olfactory sensors.
+
+        Returns:
+            An array of shape (n_sensors, n_odor_dimensions) containing the olfactory sensor readings.
+        """
+        from scipy.spatial.distance import cdist
+
+        # sensor_positions: (n_sensors, 3)
+        # odor_positions: (n_odor_sources, 3)
+        # distances: (n_sensors, n_odor_sources)
+        distances = cdist(sensor_positions, self.odor_positions)
+
+        # Assuming odor intensity follows an inverse square law with distance
+        inv_squared_distances = distances**-2
+
+        # Multiply each odor source's contribution by its peak intensity and
+        # sum contributions from all odor sources for each odor dimension.
+        # inv_squared_distances: (n_sensors, n_odor_sources)
+        # peak_intensities: (n_odor_sources, n_odor_dimensions)
+        # sensor_readings: (n_sensors, n_odor_dimensions)
+        sensor_readings = inv_squared_distances @ self.peak_intensities
+        return sensor_readings
+
+
+class ObstaclesMixin:
+    mjcf_root: mjcf.RootElement
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.obstacle_bodies: list[mjcf.Element] = []
+
+    def add_obstacle(
+        self,
+        pos=(4, 0, 2),
+        size=(1, 2),
+        type="cylinder",
+        rgba=(0, 0, 0, 1),
+        name=None,
+        **kwargs,
+    ):
+        if name is None:
+            name = f"obstacle_{len(self.obstacle_bodies)}"
+        obstacle_body = self.mjcf_root.worldbody.add(
+            "body",
+            name=name,
+            mocap=True,
+            pos=pos,
+        )
+        obstacle_body.add(
+            "geom",
+            type=type,
+            size=size,
+            rgba=rgba,
+            **kwargs,
+        )
+        self.obstacle_bodies.append(obstacle_body)
 
 
 class FlatGroundWorld(BaseWorld):
